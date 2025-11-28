@@ -26,9 +26,24 @@ def _json_default(value: Any) -> Any:
     return value
 
 
+def _human_doc(doc: dict[str, Any]) -> dict[str, Any]:
+    """Return the human portion of the document when present."""
+    if isinstance(doc.get("human"), dict):
+        return doc["human"]
+    return doc
+
+
 def _editable_view(doc: dict[str, Any]) -> dict[str, Any]:
-    excluded_keys = {"_id", "update_history", "last_updated_at", "last_updated_by"}
-    return {k: v for k, v in doc.items() if k not in excluded_keys}
+    source = _human_doc(doc)
+    excluded_keys = {
+        "_id",
+        "update_history",
+        "last_updated_at",
+        "last_updated_by",
+        "verified_by",
+        "verified_at",
+    }
+    return {k: v for k, v in source.items() if k not in excluded_keys}
 
 
 def _diff(original: dict[str, Any], updated: dict[str, Any]) -> dict[str, list[str]]:
@@ -72,28 +87,39 @@ def _load_tool_list(
     query: dict[str, Any] = {}
     if search:
         regex = {"$regex": search, "$options": "i"}
-        query = {"$or": [{"ID_tool": regex}, {"Nom_original": regex}, {"Nom_francais": regex}]}
+        query = {
+            "$or": [
+                {"ID_tool": regex},
+                {"human.ID_tool": regex},
+                {"human.Nom_original": regex},
+                {"human.Nom_francais": regex},
+            ]
+        }
     cursor = (
-        collection.find(query, {"ID_tool": 1, "Nom_original": 1, "Nom_francais": 1})
+        collection.find(
+            query,
+            {"ID_tool": 1, "human.ID_tool": 1, "human.Nom_original": 1, "human.Nom_francais": 1},
+        )
         .sort("ID_tool", 1)
         .limit(limit)
     )
     ids: list[str] = []
     summaries: dict[str, dict[str, Any]] = {}
     for doc in cursor:
-        tool_id = doc.get("ID_tool")
+        tool_id = doc.get("ID_tool") or doc.get("human", {}).get("ID_tool")
         if not tool_id:
             continue
         ids.append(tool_id)
+        human_part = doc.get("human", {})
         summaries[tool_id] = {
-            "Nom_original": doc.get("Nom_original", ""),
-            "Nom_francais": doc.get("Nom_francais", ""),
+            "Nom_original": human_part.get("Nom_original", doc.get("Nom_original", "")),
+            "Nom_francais": human_part.get("Nom_francais", doc.get("Nom_francais", "")),
         }
     return ids, summaries
 
 
 def _load_tool(collection: Collection, tool_id: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    full_doc = collection.find_one({"ID_tool": tool_id})
+    full_doc = collection.find_one({"$or": [{"ID_tool": tool_id}, {"human.ID_tool": tool_id}]})
     if not full_doc:
         return None, None
     return full_doc, _editable_view(full_doc)
@@ -256,11 +282,19 @@ def _render_items(items: list[Any], tool_id: str) -> tuple[list[Any], list[str]]
     """Render each item separately for easier editing."""
     updated_items: list[Any] = []
     errors: list[str] = []
-    for idx, item in enumerate(items):
+    extra_key = f"field_widget_{tool_id}_items_extra_count"
+    extra_count = st.session_state.get(extra_key, 0)
+    if st.button("Ajouter un item", key=extra_key + "_add"):
+        st.session_state[extra_key] = extra_count + 1
+        st.rerun()
+
+    working_items = list(items) + [{} for _ in range(extra_count)]
+    for idx, item in enumerate(working_items):
         if not isinstance(item, dict):
             updated_items.append(item)
             continue
-        with st.expander(f"Item {idx + 1}", expanded=False):
+        label = f"Item {idx + 1}"
+        with st.expander(label, expanded=False):
             prefix = f"field_widget_{tool_id}_item_{idx}_"
             id_val = st.number_input(
                 "Identifiant (id)",
@@ -300,7 +334,8 @@ def _save_tool(
     user: str,
 ) -> tuple[bool, str]:
     parsed = deepcopy(edited_doc)
-    tool_id = full_doc.get("ID_tool")
+    human_part = _human_doc(full_doc)
+    tool_id = human_part.get("ID_tool") or full_doc.get("ID_tool")
     if not tool_id:
         return False, "Impossible de retrouver l'ID_tool."
 
@@ -319,10 +354,14 @@ def _save_tool(
     }
 
     replacement = deepcopy(full_doc)
-    replacement.update(parsed)
-    replacement["last_updated_at"] = now
-    replacement["last_updated_by"] = user
-    replacement["update_history"] = (full_doc.get("update_history") or []) + [history_entry]
+    target = replacement["human"] if isinstance(replacement.get("human"), dict) else replacement
+    target.update(parsed)
+    target["last_updated_at"] = now
+    target["last_updated_by"] = user
+    target["verified_by"] = user
+    target["verified_at"] = now
+    target["update_history"] = (human_part.get("update_history") or []) + [history_entry]
+    replacement["ID_tool"] = tool_id
 
     try:
         result = collection.replace_one({"_id": full_doc["_id"]}, replacement)
@@ -492,6 +531,7 @@ def main() -> None:
     if not full_doc or editable_doc is None:
         st.error("Impossible de charger ce document.")
         return
+    human_doc = _human_doc(full_doc)
 
     needs_reload = st.session_state.get("reload_tool") == selected_id
     if st.session_state.get("current_tool_loaded") != selected_id or needs_reload:
@@ -504,9 +544,9 @@ def main() -> None:
     # Zone principale plein écran
     st.subheader(f"{selected_id}")
     st.caption(
-        f"Derniere mise a jour : {full_doc.get('last_updated_at', 'n/a')} par {full_doc.get('last_updated_by', 'n/a')}"
+        f"Derniere mise a jour : {human_doc.get('last_updated_at', 'n/a')} par {human_doc.get('last_updated_by', 'n/a')}"
     )
-    history = full_doc.get("update_history") or []
+    history = human_doc.get("update_history") or []
     with st.expander("Historique des sauvegardes", expanded=False):
         if not history:
             st.write("Aucune sauvegarde enregistree.")

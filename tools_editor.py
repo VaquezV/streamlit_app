@@ -238,10 +238,15 @@ def _render_metadata_article(meta: dict[str, Any], tool_id: str) -> tuple[dict[s
     )
     journal = meta.get("journal", {}) or {}
     jr_name = st.text_input("Revue", journal.get("Nom_Revue", ""), key=prefix + "journal_nom")
-    jr_year = st.text_input("Année revue", str(journal.get("year", "") or ""), key=prefix + "journal_year")
-    jr_volume = st.text_input("Volume", journal.get("volume", ""), key=prefix + "journal_volume")
-    jr_issue = st.text_input("Numéro", journal.get("issue", ""), key=prefix + "journal_issue")
-    jr_pages = st.text_input("Pages", journal.get("pages", ""), key=prefix + "journal_pages")
+    jr_cols = st.columns(4)
+    with jr_cols[0]:
+        jr_year = st.text_input("Année revue", str(journal.get("year", "") or ""), key=prefix + "journal_year")
+    with jr_cols[1]:
+        jr_volume = st.text_input("Volume", journal.get("volume", ""), key=prefix + "journal_volume")
+    with jr_cols[2]:
+        jr_issue = st.text_input("Numéro", journal.get("issue", ""), key=prefix + "journal_issue")
+    with jr_cols[3]:
+        jr_pages = st.text_input("Pages", journal.get("pages", ""), key=prefix + "journal_pages")
 
     parsed_authors: list[dict[str, str]] = []
     for line in authors_text.splitlines():
@@ -278,16 +283,102 @@ def _render_metadata_article(meta: dict[str, Any], tool_id: str) -> tuple[dict[s
     return updated, errors
 
 
+def _render_outil(outil: dict[str, Any], tool_id: str) -> tuple[dict[str, Any], list[str]]:
+    """Structured editor for the Outil section."""
+    outil = outil or {}
+    errors: list[str] = []
+    prefix = f"field_widget_{tool_id}_outil_"
+
+    def _lines_to_list(text: str) -> list[str]:
+        return [line.strip() for line in text.splitlines() if line.strip()]
+
+    type_outil = st.text_input("Type d'outil", outil.get("Type_outil", ""), key=prefix + "type_outil")
+    typologie = st.text_input("Typologie d'outil", outil.get("Typologie_outil", ""), key=prefix + "typologie_outil")
+    scenarios_text = st.text_area(
+        "Scénarios d'usage (1 par ligne)",
+        "\n".join(outil.get("Scenarios_usage", [])),
+        key=prefix + "scenarios",
+        height=100,
+    )
+    limitations_text = st.text_area(
+        "Limitations (1 par ligne)",
+        "\n".join(outil.get("Limitations", [])),
+        key=prefix + "limitations",
+        height=100,
+    )
+    nombre_items = st.number_input(
+        "Nombre d'items",
+        value=float(outil.get("nombre_items", 0) or 0),
+        step=1.0,
+        key=prefix + "nombre_items",
+    )
+    population = st.text_input("Population cible", outil.get("Population_cible", ""), key=prefix + "population")
+    format_reponse = st.text_input(
+        "Format de réponse",
+        outil.get("format_reponse", ""),
+        key=prefix + "format_reponse",
+    )
+    metho_text = st.text_area(
+        "Méthodes de validation (1 par ligne)",
+        "\n".join(outil.get("Psychometrie", {}).get("methodes_validation", [])),
+        key=prefix + "methodes_validation",
+        height=80,
+    )
+
+    sub_extra_key = f"field_widget_{tool_id}_sousechelles_extra_count"
+    sub_extra_count = int(st.session_state.get(sub_extra_key, 0) or 0)
+    sous_echelles_list = list(outil.get("sous_echelles", [])) + [{} for _ in range(sub_extra_count)]
+    sous_echelles: list[dict[str, Any]] = []
+    for idx, sub in enumerate(sous_echelles_list):
+        if not isinstance(sub, dict):
+            errors.append(f"Sous-echelle {idx + 1} invalide (attendu objet).")
+            continue
+        with st.expander(f"Sous-échelle {idx + 1}", expanded=False):
+            name = st.text_input("Nom", sub.get("name", ""), key=prefix + f"sous_{idx}_name")
+            items_text = st.text_area(
+                "Items (un identifiant par ligne)",
+                "\n".join([str(x) for x in sub.get("items", [])]),
+                key=prefix + f"sous_{idx}_items",
+                height=100,
+            )
+            description = st.text_area(
+                "Description",
+                sub.get("description", ""),
+                key=prefix + f"sous_{idx}_description",
+                height=80,
+            )
+        sous_echelles.append(
+            {
+                "name": name,
+                "items": _lines_to_list(items_text),
+                "description": description,
+            }
+        )
+
+    updated = {
+        "Type_outil": type_outil,
+        "Typologie_outil": typologie,
+        "Scenarios_usage": _lines_to_list(scenarios_text),
+        "Limitations": _lines_to_list(limitations_text),
+        "nombre_items": int(nombre_items) if float(nombre_items).is_integer() else nombre_items,
+        "Population_cible": population,
+        "format_reponse": format_reponse,
+        "Psychometrie": {"methodes_validation": _lines_to_list(metho_text)},
+        "sous_echelles": sous_echelles,
+    }
+
+    for k, v in outil.items():
+        if k not in updated:
+            updated[k] = v
+    return updated, errors
+
+
 def _render_items(items: list[Any], tool_id: str) -> tuple[list[Any], list[str]]:
     """Render each item separately for easier editing."""
     updated_items: list[Any] = []
     errors: list[str] = []
     extra_key = f"field_widget_{tool_id}_items_extra_count"
-    extra_count = st.session_state.get(extra_key, 0)
-    if st.button("Ajouter un item", key=extra_key + "_add"):
-        st.session_state[extra_key] = extra_count + 1
-        st.rerun()
-
+    extra_count = int(st.session_state.get(extra_key, 0) or 0)
     working_items = list(items) + [{} for _ in range(extra_count)]
     for idx, item in enumerate(working_items):
         if not isinstance(item, dict):
@@ -440,6 +531,9 @@ def _render_field_input(
             parsed = value
         return parsed, error
 
+    if name == "Outil" and isinstance(value, dict):
+        return _render_outil(value, tool_id)
+
     if name == "Metadata_article" and isinstance(value, dict):
         return _render_metadata_article(value, tool_id)
 
@@ -564,6 +658,17 @@ def main() -> None:
     tab_fields, tab_raw = st.tabs(["Champs", "JSON brut"])
 
     with tab_fields:
+        items_extra_key = f"field_widget_{selected_id}_items_extra_count"
+        if "Items" in editable_doc:
+            if st.button("Ajouter un item", key=items_extra_key + "_add"):
+                st.session_state[items_extra_key] = int(st.session_state.get(items_extra_key, 0) or 0) + 1
+                st.rerun()
+        sub_extra_key = f"field_widget_{selected_id}_sousechelles_extra_count"
+        if "Outil" in editable_doc:
+            if st.button("Ajouter une sous-échelle", key=sub_extra_key + "_add"):
+                st.session_state[sub_extra_key] = int(st.session_state.get(sub_extra_key, 0) or 0) + 1
+                st.rerun()
+
         preferred_order = [
             "ID_tool",
             "Nom_original",
